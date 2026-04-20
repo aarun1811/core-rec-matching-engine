@@ -88,7 +88,9 @@ version = "0.1.0"
 description = "Nostro reconciliation matching engine (TLM-inspired)"
 requires-python = ">=3.11"
 dependencies = [
-    "polars>=0.20",
+    # Pinned narrow: guards byte-exact expected_output.csv against serialization
+    # changes across Polars minor versions. Widen only after regenerating fixtures.
+    "polars>=0.20,<0.21",
     "typer>=0.9",
 ]
 
@@ -488,7 +490,7 @@ def _parse_attr(raw: dict, schema: Schema, pid: str, mtype: str) -> AttributeMat
             raise ConfigError(f"Pass {pid} attr {la}: invalid aggregation {agg_raw!r}")
         agg = Aggregation(side=side, function=fn)
 
-    if mtype != "ONE_TO_ONE":
+    if mtype in ("ONE_TO_MANY", "MANY_TO_ONE"):
         bare_left = _attr_bare_name(la)
         is_numeric = bare_left == "AMOUNT" or (
             bare_left in schema.extra_columns
@@ -497,6 +499,12 @@ def _parse_attr(raw: dict, schema: Schema, pid: str, mtype: str) -> AttributeMat
         if op in ("EQUALS", "WITHIN") and is_numeric and agg is None:
             raise ConfigError(
                 f"Pass {pid} attr {la}: non-1:1 pass with numeric {op} requires aggregation block"
+            )
+        if op in ("EQUALS", "WITHIN") and is_numeric and agg is not None and agg.function != "SUM":
+            # POC restriction: only SUM aggregation is implemented for 1:N / N:1.
+            # COUNT / MIN / MAX / AVG are allowed in the type enum but not yet wired.
+            raise ConfigError(
+                f"Pass {pid} attr {la}: only aggregation.function=SUM is supported for 1:N / N:1"
             )
 
     mandatory = bool(raw.get("mandatory", False))
@@ -1079,7 +1087,8 @@ def score_expr(
         if a.operator == "EQUALS":
             per_attr = pl.when(le == re).then(pl.lit(100.0)).otherwise(pl.lit(0.0))
         elif a.operator == "CONTAINS":
-            per_attr = pl.when(le.cast(pl.Utf8).str.contains_literal(re.cast(pl.Utf8))).then(pl.lit(100.0)).otherwise(pl.lit(0.0))
+            # str.contains accepts an Expr pattern; literal=True disables regex interpretation.
+            per_attr = pl.when(le.cast(pl.Utf8).str.contains(re.cast(pl.Utf8), literal=True)).then(pl.lit(100.0)).otherwise(pl.lit(0.0))
         elif a.operator == "WITHIN":
             bare_left = attr_bare_name(a.left_attribute)
             if bare_left in date_cols and a.tolerance_days is not None:
@@ -1206,26 +1215,27 @@ def match(
                 (le.cast(pl.Float64) - re_.cast(pl.Float64)).abs() <= tol_eff
             )
 
-    # Apply CONTAINS filters
+    # Apply CONTAINS filters (literal=True disables regex; accepts column-vs-column)
     for a in contains_attrs(pass_config):
         le = compile_attr_expr(a.left_attribute).cast(pl.Utf8)
         re_ = compile_attr_expr(a.right_attribute + "_R").cast(pl.Utf8)
-        candidates = candidates.filter(le.str.contains_literal(re_))
+        candidates = candidates.filter(le.str.contains(re_, literal=True))
 
     # Score
     candidates = candidates.with_columns(score_expr(pass_config).alias("_quality"))
     candidates = candidates.filter(pl.col("_quality") >= pass_config.pqr.quality)
 
-    # Greedy 1:1: left-uniqueness then right-uniqueness
+    # Greedy 1:1: left-uniqueness then right-uniqueness.
+    # sort().unique(keep="first") is unambiguous — takes the first (i.e., highest quality)
+    # row per subset. Secondary sort by _row_idx_L/_R makes tie-breaks deterministic
+    # across Polars versions and parallel execution orderings.
     candidates = (
-        candidates.sort("_quality", descending=True)
-        .group_by("_row_idx_L", maintain_order=True)
-        .head(1)
+        candidates.sort(["_quality", "_row_idx_L"], descending=[True, False])
+        .unique(subset=["_row_idx_L"], keep="first", maintain_order=True)
     )
     candidates = (
-        candidates.sort("_quality", descending=True)
-        .group_by("_row_idx_R", maintain_order=True)
-        .head(1)
+        candidates.sort(["_quality", "_row_idx_R"], descending=[True, False])
+        .unique(subset=["_row_idx_R"], keep="first", maintain_order=True)
     )
 
     # Collect survivors and allocate MGIDs
@@ -1323,7 +1333,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import polars as pl
@@ -1358,7 +1368,7 @@ class EngineResult:
 
 def run(config: Config, input_path: str | Path, cycle_date_override: str | None = None) -> EngineResult:
     t_start_all = time.time()
-    run_started = datetime.utcnow()
+    run_started = datetime.now(timezone.utc)
 
     cycle_date_str = cycle_date_override or config.cycle_date
     if not cycle_date_str:
@@ -1941,11 +1951,11 @@ def _match_one_to_many(
     candidates = candidates.with_columns(quality_expr.alias("_quality"))
     candidates = candidates.filter(pl.col("_quality") >= pass_config.pqr.quality)
 
-    # Left-uniqueness: each one-side row can join at most one bucket; pick highest quality
+    # Left-uniqueness: each one-side row can join at most one bucket; pick highest quality.
+    # Secondary sort by _one_idx makes tie-breaks deterministic.
     candidates = (
-        candidates.sort("_quality", descending=True)
-        .group_by("_one_idx", maintain_order=True)
-        .head(1)
+        candidates.sort(["_quality", "_one_idx"], descending=[True, False])
+        .unique(subset=["_one_idx"], keep="first", maintain_order=True)
     )
 
     # Collect, allocate MGIDs, explode
@@ -2123,7 +2133,7 @@ git commit -m "feat: MANY_TO_ONE matcher via 1:N axis swap"
 - [ ] **Step 11.1: Create `rec_engine/matchers/many_to_many.py`** — bucketed meet-in-the-middle
 
 ```python
-"""N:M matcher: bucketed subset-sum via meet-in-the-middle. Capped bucket size."""
+"""N:M matcher: bucketed subset-sum via brute-force enumeration within capped buckets."""
 
 from __future__ import annotations
 
@@ -2134,7 +2144,8 @@ import polars as pl
 from rec_engine.matchers.base import MGIDAllocator, hard_key_columns
 from rec_engine.types import AttributeMatch, MatchPass
 
-MAX_N2M_BUCKET_SIDE = 20  # per side
+MAX_N2M_BUCKET_SIDE = 10  # per side. Enumeration is O(2^L × 2^R); 10×10 = ~1M pairs
+                          # per bucket is tractable. Raising this materially slows N:M.
 
 
 def match(
@@ -2253,39 +2264,36 @@ def _best_subset_pair(
     tol_abs: float, tol_pct: float, tol_days: int | None,
 ) -> tuple[list[int], list[int], int] | None:
     """
-    Meet-in-the-middle: enumerate all non-empty subsets on each side, find
+    Brute-force subset-sum: enumerate all size-≥2 subsets on each side, find
     pair with SUM(L) ≈ SUM(R) within tolerance and dates all-within.
     Prefer higher quality (smaller total rows as tiebreaker).
     Returns (l_subset_idxs, r_subset_idxs, quality) or None.
+    Safe only because MAX_N2M_BUCKET_SIDE caps the enumeration size.
     """
     l_subsets = _enumerate_subsets(l_amts, l_dates, min_size=2)
     r_subsets = _enumerate_subsets(r_amts, r_dates, min_size=2)
     if not l_subsets or not r_subsets:
         return None
 
-    best = None  # tuple (quality, total_rows, li, ri)
+    # best: (quality, neg_total_rows, li_mask, ri_mask) — tuple comparison prefers
+    # higher quality, then fewer rows, then lower li_mask, then lower ri_mask (stable).
+    best: tuple[int, int, int, int] | None = None
 
     for li_mask, l_sum, l_dmin, l_dmax in l_subsets:
-        # Tolerance calculation per left subset
         tol_eff = max(tol_abs, abs(float(l_sum)) * tol_pct)
         for ri_mask, r_sum, r_dmin, r_dmax in r_subsets:
             delta = abs(float(l_sum) - float(r_sum))
             if delta > tol_eff:
                 continue
             if tol_days is not None:
-                # All-within: every date in both subsets must be within tol_days
-                # of every date in the other subset. Equivalent check: ranges must
-                # overlap within 2*tol_days, and min-to-max span must be ≤ tol_days each.
-                # Simpler: pick representative (left subset's min), check right max/min vs left max/min.
-                span_l = (l_dmax - l_dmin).days
-                span_r = (r_dmax - r_dmin).days
-                cross_lo = abs((l_dmin - r_dmin).days)
-                cross_hi = abs((l_dmax - r_dmax).days)
-                if (span_l > tol_days or span_r > tol_days
-                        or cross_lo > tol_days or cross_hi > tol_days):
+                # Correct "all-within" condition: every date in the union of both
+                # subsets must be within tol_days of every other date. Equivalent to:
+                #   max(all dates) - min(all dates) <= tol_days
+                full_min = min(l_dmin, r_dmin)
+                full_max = max(l_dmax, r_dmax)
+                if (full_max - full_min).days > tol_days:
                     continue
 
-            # Quality: linear within tolerance (floor 80)
             if tol_eff <= 0:
                 quality = 100 if delta == 0 else 0
             else:
@@ -2293,13 +2301,13 @@ def _best_subset_pair(
 
             total_rows = bin(li_mask).count("1") + bin(ri_mask).count("1")
             candidate = (quality, -total_rows, li_mask, ri_mask)
-            if best is None or candidate > best[:4]:
-                best = (quality, -total_rows, li_mask, ri_mask, quality)
+            if best is None or candidate > best:
+                best = candidate
 
     if best is None:
         return None
 
-    _, _, li_mask, ri_mask, quality = best
+    quality, _, li_mask, ri_mask = best
     li_out = [l_idxs[i] for i in range(len(l_idxs)) if li_mask & (1 << i)]
     ri_out = [r_idxs[i] for i in range(len(r_idxs)) if ri_mask & (1 << i)]
     return li_out, ri_out, quality
