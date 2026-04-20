@@ -96,6 +96,37 @@ pytest tests/test_engine_integration.py -v
 
 The test runs the CLI via subprocess and compares output byte-for-byte against `tests/fixtures/expected_output.csv`.
 
+## Generating synthetic test data
+
+Scale-test fixtures (`sample/synth_*.csv`) are gitignored — regenerate them locally with:
+
+```bash
+python scripts/generate_synthetic.py --rows 1000000  --output sample/synth_1m.csv
+python scripts/generate_synthetic.py --rows 10000000 --output sample/synth_10m.csv
+```
+
+Options:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--rows` | required | Total rows (split ~half GL / ~half STMT) |
+| `--output` | required | Output CSV path (parent dirs auto-created) |
+| `--seed` | `42` | Random seed for reproducibility |
+| `--match-rate` | `0.95` | Fraction of rows that will match via 1:1 (rest are orphans) |
+
+The generator writes three blocks in sequence: matched GL/STMT pairs (same ref, amount, date, account, currency), then unmatched GL orphans, then unmatched STMT orphans. Cardinality: 100 accounts × 4 currencies × 31 dates × uniform amounts $10-$100K. Deterministic given the seed.
+
+Then benchmark with the 1:1-only config:
+
+```bash
+time python -m rec_engine \
+  --config sample/config.json \
+  --input  sample/synth_10m.csv \
+  --output /tmp/out_10m.csv \
+  --cycle-date 2024-01-15 \
+  --verbose
+```
+
 ## Benchmarks
 
 See `sample/benchmarks.md` for measured numbers on an M4 MacBook.
