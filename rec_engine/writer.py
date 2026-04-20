@@ -102,7 +102,10 @@ def _build_manifest(
 
     return {
         "setId": config.set_id,
-        "cycleDate": config.cycle_date,
+        # Record the *effective* cycle date (CLI override takes precedence over
+        # config.cycle_date) so the manifest matches the MATCH_DATE values in
+        # the output CSV.
+        "cycleDate": result.cycle_date.isoformat(),
         "configPath": str(Path(config_path).resolve()),
         "inputPath": str(Path(input_path).resolve()),
         "outputPath": str(Path(output_path).resolve()),

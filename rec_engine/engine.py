@@ -35,6 +35,7 @@ class EngineResult:
     pass_stats: list[PassStat]
     run_started: datetime
     run_duration_sec: float
+    cycle_date: date                    # effective cycle date (CLI override takes precedence over config)
 
 
 def run(config: Config, input_path: str | Path, cycle_date_override: str | None = None) -> EngineResult:
@@ -115,4 +116,5 @@ def run(config: Config, input_path: str | Path, cycle_date_override: str | None 
         pass_stats=pass_stats,
         run_started=run_started,
         run_duration_sec=round(time.time() - t_start_all, 3),
+        cycle_date=cycle_date,
     )
