@@ -82,7 +82,7 @@
          "matchPassId": "MP_M2M",
          "matchPassName": "Many-to-Many : Ledger Credits vs Statement Debits",
          "matchType": "MANY_TO_MANY",
-         "status": "INACTIVE",
+         "status": "ACTIVE",
          "populationRule": {
             "leftPopulation":  { "populationName": "GL_CR",   "filters": [
                { "attribute": "LS_TYPE",   "operator": "=", "value": "GL" },
