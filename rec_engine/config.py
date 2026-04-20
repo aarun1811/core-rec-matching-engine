@@ -190,11 +190,19 @@ def _parse_attr(raw: dict, schema: Schema, pid: str, mtype: str) -> AttributeMat
         if is_date:
             if tol_days is None:
                 raise ConfigError(f"Pass {pid} attr {la}: WITHIN on date requires toleranceDays")
+            if not isinstance(tol_days, int) or isinstance(tol_days, bool) or tol_days <= 0:
+                raise ConfigError(
+                    f"Pass {pid} attr {la}: toleranceDays must be a positive integer, got {tol_days!r}"
+                )
         else:
             if tol_amt is None and tol_pct is None:
                 raise ConfigError(
                     f"Pass {pid} attr {la}: WITHIN on numeric requires toleranceAmount or tolerancePercent"
                 )
+            if tol_amt is not None and (not isinstance(tol_amt, (int, float)) or tol_amt < 0):
+                raise ConfigError(f"Pass {pid} attr {la}: toleranceAmount must be >= 0, got {tol_amt!r}")
+            if tol_pct is not None and (not isinstance(tol_pct, (int, float)) or tol_pct < 0):
+                raise ConfigError(f"Pass {pid} attr {la}: tolerancePercent must be >= 0, got {tol_pct!r}")
 
     agg_raw = raw.get("aggregation")
     agg: Aggregation | None = None
