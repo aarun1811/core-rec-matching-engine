@@ -1,0 +1,106 @@
+{
+   "setId": "USD_NOSTRO_CITIBANK",
+   "cycleDate": "2024-01-15",
+   "schema": { "extraColumns": {} },
+   "matchPasses": [
+      {
+         "matchPassId": "MP_O2O",
+         "matchPassName": "One-to-One : Ledger Credit vs Statement Debit",
+         "matchType": "ONE_TO_ONE",
+         "status": "ACTIVE",
+         "populationRule": {
+            "leftPopulation":  { "populationName": "GL_CR",   "filters": [
+               { "attribute": "LS_TYPE",   "operator": "=", "value": "GL" },
+               { "attribute": "DR_CR_IND", "operator": "=", "value": "CR" },
+               { "attribute": "STATUS",    "operator": "=", "value": "OPEN" }
+            ]},
+            "rightPopulation": { "populationName": "STMT_DR", "filters": [
+               { "attribute": "LS_TYPE",   "operator": "=", "value": "STMT" },
+               { "attribute": "DR_CR_IND", "operator": "=", "value": "DR" },
+               { "attribute": "STATUS",    "operator": "=", "value": "OPEN" }
+            ]}
+         },
+         "pqr": { "priority": 10, "quality": 90, "ruleOrder": 1 },
+         "attributesToMatch": [
+            { "leftAttribute": "AMOUNT",     "rightAttribute": "AMOUNT",     "operator": "EQUALS", "mandatory": true },
+            { "leftAttribute": "CURRENCY",   "rightAttribute": "CURRENCY",   "operator": "EQUALS", "mandatory": true },
+            { "leftAttribute": "VALUE_DATE", "rightAttribute": "VALUE_DATE", "operator": "WITHIN", "toleranceDays": 1, "mandatory": true },
+            { "leftAttribute": "REFERENCE",  "rightAttribute": "REFERENCE",  "operator": "EQUALS", "mandatory": false }
+         ]
+      },
+      {
+         "matchPassId": "MP_O2M",
+         "matchPassName": "One-to-Many : Ledger Credit vs Statement Debits",
+         "matchType": "ONE_TO_MANY",
+         "status": "ACTIVE",
+         "populationRule": {
+            "leftPopulation":  { "populationName": "GL_CR",   "filters": [
+               { "attribute": "LS_TYPE",   "operator": "=", "value": "GL" },
+               { "attribute": "DR_CR_IND", "operator": "=", "value": "CR" },
+               { "attribute": "STATUS",    "operator": "=", "value": "OPEN" }
+            ]},
+            "rightPopulation": { "populationName": "STMT_DR", "filters": [
+               { "attribute": "LS_TYPE",   "operator": "=", "value": "STMT" },
+               { "attribute": "DR_CR_IND", "operator": "=", "value": "DR" },
+               { "attribute": "STATUS",    "operator": "=", "value": "OPEN" }
+            ]}
+         },
+         "pqr": { "priority": 20, "quality": 85, "ruleOrder": 2 },
+         "attributesToMatch": [
+            { "leftAttribute": "AMOUNT",     "rightAttribute": "AMOUNT",     "operator": "EQUALS", "mandatory": true,
+              "aggregation": { "side": "RIGHT", "function": "SUM" } },
+            { "leftAttribute": "CURRENCY",   "rightAttribute": "CURRENCY",   "operator": "EQUALS", "mandatory": true },
+            { "leftAttribute": "VALUE_DATE", "rightAttribute": "VALUE_DATE", "operator": "WITHIN", "toleranceDays": 2, "mandatory": true }
+         ]
+      },
+      {
+         "matchPassId": "MP_M2O",
+         "matchPassName": "Many-to-One : Ledger Credits vs Statement Debit",
+         "matchType": "MANY_TO_ONE",
+         "status": "ACTIVE",
+         "populationRule": {
+            "leftPopulation":  { "populationName": "GL_CR",   "filters": [
+               { "attribute": "LS_TYPE",   "operator": "=", "value": "GL" },
+               { "attribute": "DR_CR_IND", "operator": "=", "value": "CR" },
+               { "attribute": "STATUS",    "operator": "=", "value": "OPEN" }
+            ]},
+            "rightPopulation": { "populationName": "STMT_DR", "filters": [
+               { "attribute": "LS_TYPE",   "operator": "=", "value": "STMT" },
+               { "attribute": "DR_CR_IND", "operator": "=", "value": "DR" },
+               { "attribute": "STATUS",    "operator": "=", "value": "OPEN" }
+            ]}
+         },
+         "pqr": { "priority": 30, "quality": 85, "ruleOrder": 3 },
+         "attributesToMatch": [
+            { "leftAttribute": "AMOUNT",     "rightAttribute": "AMOUNT",     "operator": "EQUALS", "mandatory": true,
+              "aggregation": { "side": "LEFT", "function": "SUM" } },
+            { "leftAttribute": "CURRENCY",   "rightAttribute": "CURRENCY",   "operator": "EQUALS", "mandatory": true },
+            { "leftAttribute": "VALUE_DATE", "rightAttribute": "VALUE_DATE", "operator": "WITHIN", "toleranceDays": 2, "mandatory": true }
+         ]
+      },
+      {
+         "matchPassId": "MP_M2M",
+         "matchPassName": "Many-to-Many : Ledger Credits vs Statement Debits",
+         "matchType": "MANY_TO_MANY",
+         "status": "ACTIVE",
+         "populationRule": {
+            "leftPopulation":  { "populationName": "GL_CR",   "filters": [
+               { "attribute": "LS_TYPE",   "operator": "=", "value": "GL" },
+               { "attribute": "DR_CR_IND", "operator": "=", "value": "CR" },
+               { "attribute": "STATUS",    "operator": "=", "value": "OPEN" }
+            ]},
+            "rightPopulation": { "populationName": "STMT_DR", "filters": [
+               { "attribute": "LS_TYPE",   "operator": "=", "value": "STMT" },
+               { "attribute": "DR_CR_IND", "operator": "=", "value": "DR" },
+               { "attribute": "STATUS",    "operator": "=", "value": "OPEN" }
+            ]}
+         },
+         "pqr": { "priority": 40, "quality": 80, "ruleOrder": 4 },
+         "attributesToMatch": [
+            { "leftAttribute": "AMOUNT",     "rightAttribute": "AMOUNT",     "operator": "WITHIN", "mandatory": true, "toleranceAmount": 0.01 },
+            { "leftAttribute": "CURRENCY",   "rightAttribute": "CURRENCY",   "operator": "EQUALS", "mandatory": true },
+            { "leftAttribute": "VALUE_DATE", "rightAttribute": "VALUE_DATE", "operator": "WITHIN", "toleranceDays": 3, "mandatory": true }
+         ]
+      }
+   ]
+}
