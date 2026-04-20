@@ -52,8 +52,13 @@ def load(input_path: str | Path, schema: Schema) -> pl.LazyFrame:
         lf = lf.with_columns(
             [pl.col(c).cast(dt) for c, dt in post_casts.items()]
         )
-    # Add _row_idx as the first column
-    lf = lf.with_row_index("_row_idx")
+    # Add _row_idx as the first column. Cast to UInt64 explicitly — Polars'
+    # with_row_index defaults to UInt32, but downstream code (engine, matchers)
+    # constructs UInt64 series for is_in() filtering; mismatched int widths
+    # silently produce wrong results.
+    lf = lf.with_row_index("_row_idx").with_columns(
+        pl.col("_row_idx").cast(pl.UInt64)
+    )
     return lf
 
 
