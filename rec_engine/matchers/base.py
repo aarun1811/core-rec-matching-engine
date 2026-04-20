@@ -44,10 +44,6 @@ def contains_attrs(pass_config: MatchPass) -> list[AttributeMatch]:
     return [a for a in pass_config.attributes_to_match if a.operator == "CONTAINS"]
 
 
-def soft_attrs(pass_config: MatchPass) -> list[AttributeMatch]:
-    return [a for a in pass_config.attributes_to_match if not a.mandatory]
-
-
 @dataclass
 class MGIDAllocator:
     """
