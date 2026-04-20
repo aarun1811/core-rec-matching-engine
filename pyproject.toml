@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rec-engine"
+version = "0.1.0"
+description = "Nostro reconciliation matching engine (TLM-inspired)"
+requires-python = ">=3.11"
+dependencies = [
+    # Pinned narrow: guards byte-exact expected_output.csv against serialization
+    # changes across Polars minor versions. Widen only after regenerating fixtures.
+    "polars>=0.20,<0.21",
+    "typer>=0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+]
+
+[project.scripts]
+rec-engine = "rec_engine.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["rec_engine*"]
