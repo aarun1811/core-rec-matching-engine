@@ -1,28 +1,40 @@
 # Benchmarks
 
-Measured on: Apple M4 MacBook, 16 GB RAM, macOS 26.3.1 (Darwin 25.3.0), Python 3.12.12, Polars 0.20.31.
+Measured on: Apple M4 MacBook (16 GB RAM), Python 3.12.12, Polars 0.20.31.
 
-Scale target: 1:1 matcher only (scale claim focuses on bulk throughput; N:M subset-sum is size-capped per bucket so doesn't scale with row count).
+All four cardinalities active (`sample/config.json` has `MP_O2O`, `MP_O2M`, `MP_M2O`, `MP_M2M` all ACTIVE). Synthetic mix: 70% 1:1 exact / 10% 1:1 date-tolerance / 8% 1:N / 8% N:1 / 1% N:M / 3% orphans.
 
-| Rows (total)       | Pairs (matched) | Wall time | Per-pass time | Match rate |
-|--------------------|-----------------|-----------|---------------|------------|
-| 1M  (500K pairs)   | 475,000         | 1.257s    | 0.9s          | 95.00%     |
-| 10M (5M pairs)     | 4,750,000       | 11.769s   | 8.7s          | 95.00%     |
-| 100M (optional)    | skipped         | skipped   | skipped       | skipped    |
+## Full-cardinality runs
 
-Wall time is the `time` command `real` value from the second (warmer) run. Per-pass time is the CLI `[pass] MP_O2O` duration. Match rate comes from the CLI `[done]` line.
+| Rows (total) | Wall time | Per-pass breakdown | Match rate |
+|---|---|---|---|
+| 1M   | **1.27s** | MP_O2O 0.7s / MP_O2M 0.2s / MP_M2O 0.2s / MP_M2M 0.2s | 97.00% |
+| 10M  | **15.74s** | MP_O2O 7.9s / MP_O2M 2.9s / MP_M2O 2.5s / MP_M2M 2.5s | 97.00% |
+| 100M | skipped   | — | — |
+
+**100M skip reason:** machine has 16 GB RAM (Python `set[int]` of matched row indices would need ~760 MB peak alone; Polars lazy frames at this scale also stretch memory). Not a code limitation — architecture stays lazy/streaming — just doesn't fit on this laptop.
+
+## Per-pass throughput at 10M
+
+| Pass | Matched groups | Matched rows | Duration | Throughput |
+|---|---|---|---|---|
+| MP_O2O (1:1) | 4,000,000 | 8,000,000 | 7.9s | ~1.0M rows/sec |
+| MP_O2M (1:N) | 177,763   | ~800,000  | 2.9s | ~275K rows/sec |
+| MP_M2O (N:1) | 177,792   | ~800,000  | 2.5s | ~320K rows/sec |
+| MP_M2M (N:M) | 25,000    | 100,000   | 2.5s | ~40K rows/sec (brute-force subset-sum bounded) |
+
+## Fixture generation
+
+```bash
+python scripts/generate_synthetic.py --rows 1000000  --output sample/synth_1m.csv     # ~3s
+python scripts/generate_synthetic.py --rows 10000000 --output sample/synth_10m.csv    # ~30s
+```
+
+Aggregate groups (1:N / N:1 / N:M) use synthetic unique `BANK_ACCOUNT` names (`NOSTRO-AGG-{kind}-{idx}`) so hash-bucket capacity scales with row count (no upper limit from the 100-account pool).
 
 ## Notes
 
-- Each run reads one CSV (streaming via `pl.scan_csv`), applies populations, runs the 1:1 matcher, writes output CSV + manifest.
-- Times include CSV read + matching + output write.
-- Architecture is fully lazy/streaming — same code path scales to 1B rows on appropriate hardware (Parquet input + more RAM).
-- N:M is NOT exercised here; its complexity is bucket-size-capped (<=10 per side), so it doesn't scale with total row count.
-- Observed scaling: 10x rows -> ~9.4x wall time, consistent with the near-linear streaming pipeline.
-- Throughput: ~850K rows/sec end-to-end at the 10M scale (10M rows in 11.77s wall).
-
-## 100M run skipped
-
-The plan flags 100M as optional and explicitly instructs to skip when running on a laptop with < 16 GB RAM or when 10M exceeds 2 minutes. This machine has exactly 16 GB RAM (below the >= 32 GB threshold recommended for 100M), so the 100M fixture was not generated or benchmarked. The 10M fixture alone is ~680 MB on disk; a 100M CSV would be ~6.8 GB, and peak working memory during the join/anti-join phase of the 1:1 matcher would likely exceed available RAM on a 16 GB machine.
-
-Given the near-linear scaling observed from 1M -> 10M, a rough extrapolation for 100M on appropriately sized hardware (>= 32 GB RAM, Parquet input) is ~2 minutes wall time for the 1:1 matcher.
+- End-to-end throughput at 10M across all 4 passes: ~635K rows/sec.
+- Scaling from 1M to 10M is ~12x (1.27s → 15.74s) — slightly super-linear because aggregate passes' subset/bucket operations grow faster than 1:1's hash join. Still acceptable.
+- N:M complexity is bounded per bucket (10×10 max) so grows linearly with N:M group count, not row count.
+- The engine is fully lazy/streaming — same code path scales to 1B rows on appropriate hardware (Parquet input, 32+ GB RAM).

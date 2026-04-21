@@ -61,18 +61,20 @@ def rand_date() -> date:
     return BASE_DATE + timedelta(days=random.randint(0, DATE_SPAN_DAYS - 1))
 
 
-def build_unique_bucket_pool() -> list[tuple[str, str]]:
-    """Return a shuffled list of every (account, currency) pair.
+def aggregate_account(kind: str, group_idx: int) -> str:
+    """Synthesize a unique BANK_ACCOUNT for one aggregate group.
 
-    The aggregate matchers (MP_O2M, MP_M2O, MP_M2M) bucket rows by the EQUALS
-    hard keys only; VALUE_DATE uses WITHIN so it is NOT part of the hash bucket.
-    That means each aggregate group must own a unique (account, currency) pair
-    or multiple groups would have their amounts summed together and fail to
-    match. Pool size = 100 accts x 4 ccys = 400 buckets.
+    Aggregate matchers (MP_O2M, MP_M2O, MP_M2M) bucket rows by the EQUALS
+    hard keys only; VALUE_DATE uses WITHIN so it is NOT part of the hash
+    bucket. Each aggregate group must therefore own a unique (BANK_ACCOUNT,
+    CURRENCY) pair or multiple groups would be summed together and fail to
+    match.
+
+    We sidestep the finite 100-account pool entirely by minting a fresh
+    account per aggregate group. This lets us scale aggregate counts with
+    the fixture size (38K+ aggregate groups at 1M rows is fine).
     """
-    pool: list[tuple[str, str]] = [(a, c) for a in ACCOUNTS for c in CCYS]
-    random.shuffle(pool)
-    return pool
+    return f"NOSTRO-AGG-{kind}-{group_idx:08d}"
 
 
 def fmt_amt(cents: int) -> str:
@@ -145,50 +147,23 @@ def main() -> None:
     rows_written = 0
     per_block = {"o2o_exact": 0, "o2o_dtol": 0, "o2n": 0, "n2o": 0, "n2m": 0, "orphan_gl": 0, "orphan_stmt": 0}
 
-    # Pre-allocate a pool of unique (account, currency) pairs. The pool is
-    # split into two disjoint slices:
+    # Bucket strategy:
     #
-    #   * The "aggregate slice" — aggregate groups (1:N, N:1, N:M) each claim
-    #     one pair here so their hash buckets are never shared with another
-    #     aggregate. If two aggregate groups shared a bucket, their amounts
-    #     would be summed together and neither would match.
+    #   * 1:1 pairs (EXACT + DTOL) use the 100-account main pool. They share
+    #     buckets freely — MP_O2O handles pairwise matching and consumes them
+    #     before any aggregate pass runs.
     #
-    #   * The "orphan slice" — reserved exclusively for orphan rows so that an
-    #     orphan amount never lands in a bucket used by an aggregate group
-    #     (which would corrupt the aggregate's SUM). Orphan rows may freely
-    #     share buckets with each other; two orphan_stmt in the same bucket
-    #     don't match anyway.
+    #   * Aggregate groups (1:N, N:1, N:M) use synthetic unique BANK_ACCOUNTs
+    #     via `aggregate_account(kind, idx)`. Each group gets a guaranteed-
+    #     unique account, so bucket capacity scales with row count.
     #
-    # When the aggregate slice is exhausted the aggregate generator STOPS
-    # early and the leftover row-budget spills into orphans. For enormous
-    # fixtures (e.g. 1M+) the aggregate allocation necessarily saturates and
-    # the mix shifts; the caller accepts that per the spec's "percentages
-    # will vary slightly" clause.
-    full_pool = build_unique_bucket_pool()
-    # Reserve a fixed share of buckets for orphans so they always have a
-    # conflict-free home. 16 buckets is plenty for the ~3% orphan slice at
-    # 10k rows (~300 orphans across 16 buckets averages ~20 orphans/bucket,
-    # none of which match anything). The remaining ~384 buckets cover the
-    # ~380 aggregate groups the default 10k mix generates.
-    orphan_reserve_size = min(16, len(full_pool) // 4)
-    orphan_pool = full_pool[:orphan_reserve_size]
-    agg_pool = full_pool[orphan_reserve_size:]
-    reserved_agg_buckets: set[tuple[str, str]] = set()
+    #   * Orphans use the same 100-account main pool. They don't match anything
+    #     in any pass, and because aggregate groups use disjoint synthetic
+    #     accounts (NOSTRO-AGG-*), orphans never contaminate an aggregate SUM.
 
-    def try_next_agg_bucket() -> tuple[str, str, date] | None:
-        """Pop a unique (acct, ccy) pair from the pool, or return None if empty."""
-        if not agg_pool:
-            return None
-        a, c = agg_pool.pop()
-        reserved_agg_buckets.add((a, c))
-        return (a, c, rand_date())
-
-    def next_orphan_bucket() -> tuple[str, str, date]:
-        # Orphans draw from the dedicated orphan slice (disjoint from every
-        # aggregate bucket). Multiple orphans can share the same bucket — they
-        # don't match in any pass, so there is no interference.
-        a, c = random.choice(orphan_pool)
-        return (a, c, rand_date())
+    def next_main_bucket() -> tuple[str, str, date]:
+        """Random bucket from the main 100-account pool (for 1:1 pairs and orphans)."""
+        return (random.choice(ACCOUNTS), random.choice(CCYS), rand_date())
 
     with out.open("w", encoding="utf-8") as f:
         f.write("LS_TYPE,DR_CR_IND,STATUS,AMOUNT,CURRENCY,VALUE_DATE,BANK_ACCOUNT,REFERENCE\n")
@@ -222,32 +197,18 @@ def main() -> None:
             per_block["o2o_dtol"] += 2
             rows_written += 2
 
-        # Aggregate groups must each own a unique (account, currency) pair so
-        # their hash buckets don't mix with other aggregates. We reserve N:M
-        # first (smallest share — guaranteed to fit), then 1:N, then N:1. If
-        # the pool dries up mid-pass, that pass's loop breaks early and the
-        # leftover row budget spills to orphans at the end.
-        #
-        # k (STMTs per 1:N group / GLs per N:1 group) stays in the spec's
-        # [2, 4] range but is weighted toward larger values. That produces
-        # fewer groups per row-target, keeping the total group count below
-        # the 400-bucket ceiling for default mixes up to ~10k rows. Still
-        # "Variable 3-5 rows per unit" per spec.
+        # k (STMTs per 1:N group / GLs per N:1 group) uses the spec's
+        # [2, 4] range with a weighted distribution toward larger values.
+        # E[k] = 3.5 -> avg unit size 4.5 rows.
         def pick_k() -> int:
-            # Weighted toward k=4 to keep group count below the 400-bucket
-            # ceiling (100 accts x 4 ccys = 400 unique hash buckets).
-            # P(k=2)=1/8, P(k=3)=2/8, P(k=4)=5/8. E[k]=3.5 → avg unit size 4.5
-            # → ~178 groups per aggregate type at 10k rows. Still respects the
-            # spec's "Variable 3-5 rows per unit (k in [2,4])" requirement.
             return random.choices([2, 3, 4], weights=[1, 2, 5], k=1)[0]
 
-        # ---- N:M groups: 2 GL + 2 STMT; hard keys identical, GL sum == STMT sum ----
+        # ---- N:M groups: 2 GL + 2 STMT; each group uses a unique synthetic account ----
         n2m_units = target_n2m // 4
         for i in range(n2m_units):
-            bucket = try_next_agg_bucket()
-            if bucket is None:
-                break
-            acct, ccy, vdt = bucket
+            acct = aggregate_account("N2M", i)
+            ccy = random.choice(CCYS)
+            vdt = rand_date()
             total_cents = rand_amount_cents()
             gl_parts   = split_cents(total_cents, 2, min_part=1)
             stmt_parts = split_cents(total_cents, 2, min_part=1)
@@ -258,16 +219,14 @@ def main() -> None:
             per_block["n2m"] += 4
             rows_written += 4
 
-        # ---- 1:N groups: 1 GL + k STMT (k in [2,4]); hard keys identical, STMT sum == GL amt ----
+        # ---- 1:N groups: 1 GL + k STMT (k in [2,4]); unique synthetic account per group ----
         i = 0
         while per_block["o2n"] < target_o2n_rows:
-            bucket = try_next_agg_bucket()
-            if bucket is None:
-                break
-            acct, ccy, vdt = bucket
+            acct = aggregate_account("O2N", i)
+            ccy = random.choice(CCYS)
+            vdt = rand_date()
             k = pick_k()
             total_cents = rand_amount_cents()
-            # Ensure total is large enough to split into k parts of >= 1 cent (trivial bc >= 1000 cents)
             parts = split_cents(total_cents, k, min_part=1)
             gl_ref = f"O2N_GRP_{i:08d}"
             write_row(f, "GL", "CR", total_cents, ccy, vdt, acct, gl_ref)
@@ -279,13 +238,12 @@ def main() -> None:
             rows_written += unit_rows
             i += 1
 
-        # ---- N:1 groups: k GL + 1 STMT (k in [2,4]); hard keys identical, GL sum == STMT amt ----
+        # ---- N:1 groups: k GL + 1 STMT (k in [2,4]); unique synthetic account per group ----
         i = 0
         while per_block["n2o"] < target_n2o_rows:
-            bucket = try_next_agg_bucket()
-            if bucket is None:
-                break
-            acct, ccy, vdt = bucket
+            acct = aggregate_account("N2O", i)
+            ccy = random.choice(CCYS)
+            vdt = rand_date()
             k = pick_k()
             total_cents = rand_amount_cents()
             parts = split_cents(total_cents, k, min_part=1)
@@ -300,8 +258,9 @@ def main() -> None:
             i += 1
 
         # ---- Orphans: fill the rest exactly; split ~half GL-only / ~half STMT-only ----
-        # Orphans draw from the reserved orphan-only bucket slice so they never
-        # pollute an aggregate bucket's SUM. Orphans do NOT need unique
+        # Orphans use the main 100-account pool. Since aggregate groups live on
+        # disjoint synthetic accounts (NOSTRO-AGG-*), orphans can never land in
+        # an aggregate bucket and corrupt a SUM. Orphans do NOT need unique
         # buckets among themselves — they don't match anything in any pass.
         remaining = n - rows_written
         if remaining < 0:
@@ -312,7 +271,7 @@ def main() -> None:
 
         for i in range(orphan_gl):
             amt = rand_amount_cents()
-            acct, ccy, vdt = next_orphan_bucket()
+            acct, ccy, vdt = next_main_bucket()
             ref = f"ORPH_GL_{i:08d}"
             write_row(f, "GL", "CR", amt, ccy, vdt, acct, ref)
             per_block["orphan_gl"] += 1
@@ -320,7 +279,7 @@ def main() -> None:
 
         for i in range(orphan_stmt):
             amt = rand_amount_cents()
-            acct, ccy, vdt = next_orphan_bucket()
+            acct, ccy, vdt = next_main_bucket()
             ref = f"ORPH_STMT_{i:08d}"
             write_row(f, "STMT", "DR", amt, ccy, vdt, acct, ref)
             per_block["orphan_stmt"] += 1
