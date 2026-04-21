@@ -2,8 +2,12 @@
 
 A Nostro "fresh" reconciliation matching engine inspired by SmartStream TLM,
 built in Python + Polars. Streaming LazyFrame architecture scales from 1M
-rows (~1 second) to 10M rows (~12 seconds) to 100M+ rows on appropriately
-sized hardware, with a 1B architectural claim backed by linear scaling.
+rows (~1.3 seconds) to 10M rows (~16 seconds) with all 4 cardinalities active,
+to 100M+ rows on appropriately sized hardware.
+
+Includes a FastAPI backend for saving configs, triggering runs, paginating
+matches/breaks with filters, and downloading outputs — see the **API backend**
+section below.
 
 ## Features
 
@@ -14,6 +18,7 @@ sized hardware, with a 1B architectural claim backed by linear scaling.
 - Pass ordering via `ruleOrder`; matched rows excluded from later passes
 - TLM-style output: `STATUS`, `MATCH_DATE`, `MATCHING_ID`, `MATCHED_BY_PASS`, `MATCH_QUALITY`
 - Sidecar `manifest.json` with per-pass breakdown
+- HTTP API (FastAPI) for config management, runs, and paginated result queries
 
 ## Install
 
@@ -57,23 +62,31 @@ CLI → config.load → loader.scan_csv → engine.run_passes → writer.sink_cs
 Module layout:
 
 ```
-rec_engine/
-├── cli.py           # typer CLI entry point
-├── engine.py        # orchestrator: load → passes in ruleOrder → write
-├── config.py        # JSON loader with cross-pass validation
-├── schema.py        # canonical + extra column dtype map
-├── loader.py        # pl.scan_csv with explicit dtypes + _row_idx
-├── populations.py   # filter evaluation: =, !=, IN, LIKE, etc.
-├── expressions.py   # operator / SUBSTRING → pl.Expr compiler
-├── scorer.py        # quality score 0-100 as a pl.Expr
-├── writer.py        # output assembly + manifest.json
-├── types.py         # config dataclasses
+rec_engine/                  # core engine library
+├── cli.py                   # typer CLI entry point
+├── engine.py                # orchestrator: load → passes in ruleOrder → write
+├── config.py                # JSON loader with cross-pass validation
+├── schema.py                # canonical + extra column dtype map
+├── loader.py                # pl.scan_csv with explicit dtypes + _row_idx
+├── populations.py           # filter evaluation: =, !=, IN, LIKE, etc.
+├── expressions.py           # operator / SUBSTRING → pl.Expr compiler
+├── scorer.py                # quality score 0-100 as a pl.Expr
+├── writer.py                # output assembly + manifest.json
+├── types.py                 # config dataclasses
 └── matchers/
-    ├── base.py          # hard keys, soft/tolerance attrs, MGIDAllocator
-    ├── one_to_one.py    # 1:1 greedy hash-join
-    ├── one_to_many.py   # 1:N full-bucket aggregation
-    ├── many_to_one.py   # N:1 via axis-swapped 1:N
-    └── many_to_many.py  # N:M bucketed brute-force subset-sum
+    ├── base.py                # hard keys, tolerance attrs, MGIDAllocator
+    ├── one_to_one.py          # 1:1 greedy hash-join
+    ├── one_to_many.py         # 1:N full-bucket aggregation
+    ├── many_to_one.py         # N:1 via axis-swapped 1:N
+    └── many_to_many.py        # N:M bucketed brute-force subset-sum
+
+rec_engine_api/              # FastAPI backend (depends on rec_engine)
+├── main.py                  # app + routes + exception handlers
+├── schemas.py               # pydantic request/response models
+├── storage.py               # filesystem read/write for configs + runs
+├── runs.py                  # run execution wrapper
+├── filters.py               # minimal filter DSL over output CSV
+└── cli.py                   # uvicorn launch entrypoint
 ```
 
 ## Config reference
@@ -109,14 +122,25 @@ Options:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--rows` | required | Total rows (split ~half GL / ~half STMT) |
+| `--rows` | required | Approximate total rows (may be ±3 due to variable N in 1:N / N:1 groups) |
 | `--output` | required | Output CSV path (parent dirs auto-created) |
 | `--seed` | `42` | Random seed for reproducibility |
-| `--match-rate` | `0.95` | Fraction of rows that will match via 1:1 (rest are orphans) |
+| `--match-rate` | `0.97` | **Deprecated**; ignored (mix is fixed, see below) |
 
-The generator writes three blocks in sequence: matched GL/STMT pairs (same ref, amount, date, account, currency), then unmatched GL orphans, then unmatched STMT orphans. Cardinality: 100 accounts × 4 currencies × 31 dates × uniform amounts $10-$100K. Deterministic given the seed.
+Fixed mix (~97% matched, ~3% orphans):
 
-Then benchmark with the 1:1-only config:
+| Pattern | % of rows | Matched by |
+|---|---|---|
+| 1:1 exact | 70% | MP_O2O |
+| 1:1 with date tolerance (STMT +1 day) | 10% | MP_O2O |
+| 1:N (1 GL + 2-4 STMTs summing to GL) | 8% | MP_O2M |
+| N:1 (2-4 GLs summing to 1 STMT) | 8% | MP_M2O |
+| N:M (2 GLs + 2 STMTs, balanced sums) | 1% | MP_M2M |
+| Orphans (GL-only + STMT-only) | 3% | — (UNMATCHED) |
+
+Aggregate groups (1:N / N:1 / N:M) use synthetic unique `BANK_ACCOUNT` names (`NOSTRO-AGG-{kind}-{idx}`) so bucket capacity scales with row count. 1:1 pairs and orphans share the main 100-account pool. Deterministic given the seed.
+
+Then benchmark with all 4 passes active:
 
 ```bash
 time python -m rec_engine \
@@ -126,6 +150,91 @@ time python -m rec_engine \
   --cycle-date 2024-01-15 \
   --verbose
 ```
+
+## API backend
+
+HTTP wrapper around the engine with endpoints for saving configs, triggering runs, and paginating matches/breaks with filters.
+
+### Start the server
+
+```bash
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+# Option A: console script
+rec-engine-api
+
+# Option B: module
+python -m rec_engine_api
+
+# Option C: uvicorn directly (dev auto-reload)
+uvicorn rec_engine_api.main:app --reload --port 8000
+```
+
+Server binds to `127.0.0.1:8000` by default. Override via `REC_ENGINE_API_HOST` / `REC_ENGINE_API_PORT` env vars.
+
+Storage root defaults to the current working directory. Override via `REC_ENGINE_STORAGE_ROOT`. Configs live under `{root}/configs/`, run artifacts under `{root}/runs/{runId}/`. Both directories are gitignored.
+
+Interactive docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+
+### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/configs/validate` | Validate a match-pass JSON (no save) |
+| `POST` | `/configs` | Validate + save, returns `configId` |
+| `GET`  | `/configs` | List saved configs |
+| `GET`  | `/configs/{configId}` | Fetch full config |
+| `POST` | `/runs` | Execute a run against a server-side input CSV path |
+| `GET`  | `/runs` | List runs |
+| `GET`  | `/runs/{runId}` | Fetch run manifest + meta |
+| `GET`  | `/runs/{runId}/matches` | Paginated matched rows, optional filters |
+| `GET`  | `/runs/{runId}/breaks` | Paginated unmatched rows, optional filters |
+| `GET`  | `/runs/{runId}/download/{kind}` | Download `output` (CSV) or `manifest` (JSON) |
+
+`/matches` and `/breaks` query params: `limit` (default 100, max 10000), `offset` (default 0), `matched_by_pass`, `currency`, `bank_account` (all optional, exact equality).
+
+### Example flow
+
+```bash
+# 1. Save a config
+curl -s -X POST http://127.0.0.1:8000/configs \
+  -H 'Content-Type: application/json' \
+  --data @tests/fixtures/config.json | python -m json.tool
+# → {"configId": "cfg_USD_NOSTRO_CITIBANK_20260421T...", ...}
+
+# 2. Trigger a run
+curl -s -X POST http://127.0.0.1:8000/runs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "configId": "cfg_USD_NOSTRO_CITIBANK_20260421T143012Z",
+    "inputPath": "/absolute/path/to/input.csv",
+    "cycleDate": "2024-01-15"
+  }' | python -m json.tool
+# → {"runId": "run_...", "metrics": {...}, "outputPath": "./runs/.../output.csv", ...}
+
+# 3. Page through matches, filtered by pass
+curl -s 'http://127.0.0.1:8000/runs/run_.../matches?matched_by_pass=MP_O2M&limit=50'
+
+# 4. Download the output CSV
+curl -s 'http://127.0.0.1:8000/runs/run_.../download/output' -o downloaded_output.csv
+```
+
+### Errors
+
+All endpoints return `{"error": "..."}` with appropriate HTTP status:
+- `400` — config validation / missing input path / bad request body
+- `404` — config or run not found
+- `422` — FastAPI query param validation (e.g. `limit` out of range)
+- `500` — unexpected server error
+
+### Running the API integration test
+
+```bash
+pytest tests/test_api_integration.py -v
+```
+
+Exercises all 10 endpoints end-to-end against `tests/fixtures/config.json` + `tests/fixtures/input.csv`. Uses a `tmp_path`-scoped `REC_ENGINE_STORAGE_ROOT` so test storage doesn't pollute the project root.
 
 ## Benchmarks
 

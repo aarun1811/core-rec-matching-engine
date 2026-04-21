@@ -89,7 +89,7 @@
          "matchPassId": "MP_O2M",
          "matchPassName": "One-to-Many : Ledger Credit vs Statement Debits",
          "matchType": "ONE_TO_MANY",
-         "status": "INACTIVE",
+         "status": "ACTIVE",
          "populationRule": {
             "leftPopulation": {
                "populationName": "GL_CR",
@@ -167,7 +167,7 @@
          "matchPassId": "MP_M2O",
          "matchPassName": "Many-to-One : Ledger Credits vs Statement Debit",
          "matchType": "MANY_TO_ONE",
-         "status": "INACTIVE",
+         "status": "ACTIVE",
          "populationRule": {
             "leftPopulation": {
                "populationName": "GL_CR",
@@ -245,7 +245,7 @@
          "matchPassId": "MP_M2M",
          "matchPassName": "Many-to-Many : Ledger Credits vs Statement Debits",
          "matchType": "MANY_TO_MANY",
-         "status": "INACTIVE",
+         "status": "ACTIVE",
          "populationRule": {
             "leftPopulation": {
                "populationName": "GL_CR",

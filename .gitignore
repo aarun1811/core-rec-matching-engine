@@ -10,3 +10,5 @@ venv/
 build/
 dist/
 sample/synth_*.csv
+configs/
+runs/
