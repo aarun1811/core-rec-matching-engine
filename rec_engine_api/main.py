@@ -8,6 +8,7 @@ doesn't stall the event loop.
 from __future__ import annotations
 
 import json
+import os
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ from typing import Any
 
 from fastapi import FastAPI, Query, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from rec_engine.config import ConfigError, _parse_config
@@ -45,6 +47,23 @@ app = FastAPI(
     title="Reconciliation Matching Engine API",
     version="0.1.0",
     lifespan=_lifespan,
+)
+
+# CORS — permissive by default for local dev so a browser-based UI on any port
+# (e.g. Vite on 5173, CRA on 3000) can hit the API directly. Override via the
+# REC_ENGINE_API_CORS_ORIGINS env var — comma-separated list of allowed origins.
+# Set it to a specific origin in production (e.g. "https://recon.yourdomain.com").
+_cors_env = os.environ.get("REC_ENGINE_API_CORS_ORIGINS", "*").strip()
+_cors_origins: list[str] = ["*"] if _cors_env == "*" else [o.strip() for o in _cors_env.split(",") if o.strip()]
+# `allow_credentials=True` requires explicit origins; Starlette silently ignores
+# it when origins=["*"], so wildcard + no-credentials is the correct pairing.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=(_cors_origins != ["*"]),
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Disposition"],  # so fetch() can read the filename on downloads
 )
 
 

@@ -171,9 +171,11 @@ python -m rec_engine_api
 uvicorn rec_engine_api.main:app --reload --port 8000
 ```
 
-Server binds to `127.0.0.1:8000` by default. Override via `REC_ENGINE_API_HOST` / `REC_ENGINE_API_PORT` env vars.
+Server binds to `127.0.0.1:8000` by default. Override via `REC_ENGINE_API_HOST` / `REC_ENGINE_API_PORT` env vars (e.g. `REC_ENGINE_API_PORT=9000 rec-engine-api`). Or use uvicorn directly for more control: `uvicorn rec_engine_api.main:app --port 9000 --host 0.0.0.0 --reload`.
 
 Storage root defaults to the current working directory. Override via `REC_ENGINE_STORAGE_ROOT`. Configs live under `{root}/configs/`, run artifacts under `{root}/runs/{runId}/`. Both directories are gitignored.
+
+**CORS**: permissive by default (`Access-Control-Allow-Origin: *`) so a browser-based UI on any local port (Vite 5173, CRA 3000, etc.) can call the API without preflight failures. Override with the `REC_ENGINE_API_CORS_ORIGINS` env var — comma-separated list of allowed origins. In prod, set it to a specific origin (e.g. `REC_ENGINE_API_CORS_ORIGINS=https://recon.example.com`). When you supply specific origins, `allow_credentials=True` is enabled automatically; the wildcard mode has credentials off (browser spec constraint).
 
 Interactive docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 
