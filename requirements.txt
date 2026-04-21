@@ -1,0 +1,20 @@
+# Runtime dependencies for rec-engine — exact pins.
+#
+# Polars is pinned tight (<0.21) so byte-exact expected_output.csv survives
+# across minor Polars releases that occasionally change Decimal/Date CSV
+# serialization. Widen only after regenerating fixtures.
+#
+# Typer's transitive deps (click, rich, etc.) are pinned to the versions
+# resolved locally against Python 3.12 to keep server installs reproducible.
+
+polars==0.20.31
+
+typer==0.24.1
+click==8.3.2
+shellingham==1.5.4
+
+# typer -> rich (help formatting)
+rich==15.0.0
+markdown-it-py==4.0.0
+mdurl==0.1.2
+Pygments==2.20.0
