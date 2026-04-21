@@ -12,16 +12,22 @@ dependencies = [
     # changes across Polars minor versions. Widen only after regenerating fixtures.
     "polars>=0.20,<0.21",
     "typer>=0.9",
+    # API backend deps
+    "fastapi>=0.110,<0.120",
+    "uvicorn[standard]>=0.27,<0.35",
+    "pydantic>=2.5,<3",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4",
+    "httpx>=0.27,<1",
 ]
 
 [project.scripts]
 rec-engine = "rec_engine.cli:app"
+rec-engine-api = "rec_engine_api.cli:run"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["rec_engine*"]
+include = ["rec_engine*", "rec_engine_api*"]
